@@ -1,0 +1,57 @@
+---
+# Source: audius-creator-node/templates/backend-cm.yaml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: creator-node-backend-cm
+  namespace: default
+data:
+  
+  dbUrl: "postgres://postgres:postgres@creator-node-db-svc.default.svc.cluster.local:5432/audius_creator_node"
+  
+  redisHost: "creator-node-cache-svc.default.svc.cluster.local"
+  redisPort: "6379"
+  ipfsHost: "creator-node-ipfs-svc.default.svc.cluster.local"
+  ipfsPort: "5001"
+  creatorNodeEndpoint: "<SEE_README>"
+  dataNetworkId: "99"
+  dataProviderUrl: "https://poa-gateway.audius.co"
+  dataRegistryAddress: "0xC611C82150b56E6e4Ec5973AcAbA8835Dd0d75A2"
+  dbConnectionPoolMax: "500"
+  delegateOwnerWallet: "<SEE_README>"
+  delegatePrivateKey: "<SEE_README>"
+  disableSnapback: "true"
+  discoveryProviderWhitelist: ""
+  ethNetworkId: "1"
+  ethOwnerWallet: "0xe886a1858d2d368ef8f02c65bdd470396a1ab188"
+  ethProviderUrl: "https://mainnet.infura.io/v3/a3ed533ddfca4c76ab4df7556e2745e1"
+  ethRegistryAddress: "0xd976d3b4f4e22a238c1A736b6612D22f17b6f64C"
+  ethTokenAddress: "0x18aAA7115705e8be94bfFEBDE57Af9BFc265B998"
+  headersTimeout: "60000"
+  identityService: "https://identityservice.audius.co"
+  keepAliveTimeout: "5000"
+  logLevel: "info"
+  maxAudioFileSizeBytes: "1000000000"
+  pinAddCIDs: "QmXSa6NxfA3e2hCpd8P5gNnZJs9PjZ3yGDHiRHR5B7Rq52,QmcCB48sqkdTqF2XCvQHyPWV6n7biweWEA2h5FoqFyJMrJ"
+  setTimeout: "3600000"
+  snapbackHighestReconfigMode: "RECONFIG_DISABLED"
+  spOwnerWallet: "<SEE_README>"
+  stateMonitoringQueueRateLimitInterval: "60000"
+  stateMonitoringQueueRateLimitJobsPerInterval: "3"
+  timeout: "3600000"
+
+
+---
+# Source: audius-creator-node/templates/db-cm.yaml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: creator-node-db-cm
+  namespace: default
+data:
+  POSTGRES_DB: audius_creator_node
+  POSTGRES_USER: postgres
+
+

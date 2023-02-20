@@ -1,0 +1,40 @@
+---
+# Source: audius-discovery-provider/templates/db-pvc.yaml
+
+
+kind: PersistentVolume
+apiVersion: v1
+metadata:
+  name: discovery-provider-db-pv
+  namespace: default
+spec:
+  storageClassName: local
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: /var/k8s
+  persistentVolumeReclaimPolicy: Retain
+---
+
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: discovery-provider-db-pvc
+  namespace: default
+spec:
+  storageClassName: local
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+
+
+---
+# Source: audius-discovery-provider/templates/ipfs-pvc.yaml
+
+
+
+

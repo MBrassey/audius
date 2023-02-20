@@ -1,0 +1,790 @@
+#!/usr/bin/env python3.8
+
+import argparse
+import time
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.request
+
+import psutil
+import yaml
+from crontab import CronTab
+
+
+def _apply_config(manifests_path):
+    """Helper function to apply config maps"""
+    config_file = os.path.join(manifests_path, "config.yaml")
+
+    if not os.path.isfile(config_file):
+        return
+
+    with open(config_file, "r") as stream:
+        config = yaml.safe_load(stream) or {}
+
+    for service, pods in config.items():
+        config_map = os.path.join(manifests_path, f"audius/{service}/{service}-cm.yaml")
+        with open(config_map, "r") as stream:
+            config_map_data = list(yaml.safe_load_all(stream))
+        config_map_names = [i["metadata"]["name"] for i in config_map_data]
+
+        for pod, changes in pods.items():
+            if f"{service}-{pod}-cm" not in config_map_names:
+                continue
+
+            idx = config_map_names.index(f"{service}-{pod}-cm")
+            for key, value in changes.items():
+                config_map_data[idx]["data"][key] = value
+
+        with open(config_map, "w") as stream:
+            yaml.safe_dump_all(config_map_data, stream, explicit_start=True)
+
+
+def _get_ip_addr():
+    resp = json.load(urllib.request.urlopen("https://ipapi.co/json"))
+    return resp["ip"]
+
+
+def _get_unset_keys(service, manifests_path):
+    """Helper function to check the config map files for values that are empty or set to <SEE_README>"""
+    config_map_filename = os.path.join(
+        manifests_path, f"audius/{service}/{service}-cm.yaml"
+    )
+
+    all_unset_keys = {}
+    with open(config_map_filename, "r") as stream:
+        for config_map in yaml.safe_load_all(stream):
+            unset_keys = []
+            for key, value in config_map["data"].items():
+                if value in ["", "<SEE_README>"]:
+                    unset_keys.append(key)
+            if unset_keys:
+                all_unset_keys[config_map["metadata"]["name"]] = unset_keys
+
+    return all_unset_keys
+
+
+def _git_log(repo, commit, count):
+    resp = json.load(
+        urllib.request.urlopen(
+            f"https://api.github.com/repos/{repo}/commits?sha={commit}&per_page={count}"
+        )
+    )
+
+    ret = []
+    for commit in resp:
+        sha = commit["sha"][0:8]
+        msg = commit["commit"]["message"].split("\n")[0]
+        author = commit["committer"]["login"]
+        ret.append(f"[{sha}] {msg} {author}")
+
+    return "\n".join(ret)
+
+
+def _is_creator_node_healthy(health_check_resp):
+    return health_check_resp["data"]["healthy"]
+
+
+def _is_discovery_provider_healthy(health_check_resp, strict):
+    if strict:
+        return (
+            health_check_resp["data"]["block_difference"]
+            < health_check_resp["data"]["maximum_healthy_block_difference"]
+        )
+    else:
+        return "block_difference" in health_check_resp["data"]
+
+
+def _is_identity_healthy(health_check_resp):
+    return health_check_resp["healthy"]
+
+
+def _kubectl_apply(service, manifest, manifests_path):
+    subprocess.run(
+        [
+            "kubectl",
+            "apply",
+            "-f",
+            os.path.join(manifests_path, f"audius/{service}/{service}-{manifest}.yaml"),
+        ]
+    )
+
+
+def _kubectl_diff(service, manifest, manifests_path):
+    return subprocess.run(
+        [
+            "kubectl",
+            "diff",
+            "-f",
+            os.path.join(manifests_path, f"audius/{service}/{service}-{manifest}.yaml"),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode
+
+
+def _kubectl_get_svc():
+    return json.loads(
+        subprocess.run(
+            ["kubectl", "get", "svc", "-o", "json"],
+            stdout=subprocess.PIPE,
+        ).stdout
+    )
+
+
+def _kubectl_wait_seed_job():
+    subprocess.run(
+        [
+            "kubectl",
+            "wait",
+            "--for=condition=complete",
+            "--timeout=-1s",
+            "job/discovery-provider-db-seed-job",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def auto_upgrade(cron_expression, remove, manifests_path):
+    """Function to setup a cron job that autoupgrades the node"""
+    with CronTab(user=True) as cron:
+        for job in cron.find_comment("audius-cli auto-upgrade"):
+            cron.remove(job)
+        if not remove:
+            # Create {manifests_path}/.logs dir if it does not exist
+            logs_dir_path = os.path.join(manifests_path, ".logs")
+            if not os.path.exists(logs_dir_path):
+                os.makedirs(logs_dir_path)
+
+            # Pipe auto upgrade logs to {manifests_path}/.logs/auto_upgrade.txt
+            print(f"Setting auto-upgrade cadence [{cron_expression}]")
+            logs_file_path = os.path.join(logs_dir_path, "auto_upgrade.txt")
+            job = cron.new(
+                f"date >> {logs_file_path}; (bash -c 'yes | /usr/local/bin/audius-cli upgrade' 2>&1) >> {logs_file_path}; echo >> {logs_file_path}",
+                "audius-cli auto-upgrade",
+            )
+            job.setall(cron_expression)
+
+
+def check_config(service, manifests_path):
+    """Checks the config for unset keys"""
+    unset_keys = _get_unset_keys(service, manifests_path)
+    if unset_keys:
+        for config_map, unset in unset_keys.items():
+            print(f"{config_map} has unset keys: {', '.join(unset)}")
+        sys.exit(1)
+
+
+def configure_ipfs(hostname):
+    """Function to configure the node's IPFS settings given a hostname"""
+    subprocess.run(
+        f'kubectl exec -it $(kubectl get pods -l tier=ipfs -o json | jq -r \'.items | first.metadata.name\') -- ipfs config --json Addresses.Announce "[\\"/ip4/{hostname}/tcp/$(kubectl get svc -o json | jq \'.items | map(select(.metadata.name | contains("ipfs")).spec.ports) | flatten | map(select(.port == 4001)) | first.nodePort\')\\"]"',
+        shell=True,
+        check=True,
+    )
+    subprocess.run(
+        "kubectl delete pod $(kubectl get pods -l tier=ipfs -o json | jq -r '.items | first.metadata.name')",
+        shell=True,
+        check=True,
+    )
+
+
+def health_check(service, cmd=True):
+    """Function to check whether a given service is healthy"""
+    service_running = False
+
+    try:
+        for item in _kubectl_get_svc()["items"]:
+            if item["metadata"]["name"] == f"{service}-backend-svc":
+                service_running = True
+                port = item["spec"]["ports"][0]["nodePort"]
+                url = f"http://localhost:{port}/health_check"
+
+                resp = {}
+                try:
+                    resp = json.load(urllib.request.urlopen(url))
+                    healthy = False
+                    if service == "creator-node":
+                        healthy = _is_creator_node_healthy(resp)
+                    elif service == "discovery-provider":
+                        healthy = _is_discovery_provider_healthy(resp, cmd)
+                    elif service == "identity":
+                        healthy = _is_identity_healthy(resp)
+                except urllib.error.HTTPError:
+                    healthy = False
+
+                if cmd:
+                    print("Reponse: ")
+                    print(json.dumps(resp, sort_keys=True, indent=4))
+                    print()
+                    print(f"{service} is {'healthy' if healthy else 'not healthy'}")
+                else:
+                    return healthy
+    except Exception as e:
+        pass
+
+    if not cmd:
+        return False
+
+    if not service_running:
+        print(
+            f"Provided service ({service}) does not seem to be running", file=sys.stderr
+        )
+        sys.exit(1)
+
+
+def launch(service, configure_ipfs_flag, seed_job, manifests_path):
+    """
+    Function to launch a given service
+
+    Perform all launch steps:
+      - Check for unset key-value pairs
+      - Prompt for user launch confirmation
+      - Apply all kube manifest files (and seed job if discovery-provider)
+      - Check if the config map is updated but not the backend, in which case restart the backend pod
+    """
+
+    # check for unset keys
+    unset_keys = _get_unset_keys(service, manifests_path)
+    if unset_keys:
+        for config_map, unset in unset_keys.items():
+            print(f"{config_map} has unset keys: {', '.join(unset)}", file=sys.stderr)
+    else:
+        print("All config keys seem to be set.")
+
+    total_memory = psutil.virtual_memory().total / (1024 ** 3)
+    cpu_count = psutil.cpu_count()
+
+    print(f"CPUs: {cpu_count} (at least 8 recommend)")
+    print(f"RAM:  {total_memory} GB (at least 16 GB recommend)")
+
+    if cpu_count < 8 or total_memory < 16:
+        print("System does not meet recommend requirements")
+    else:
+        print("System meets recommend requirements")
+
+    # prompt for user confirmation
+    if not input("Do you want to continue? [y/N] ").lower().startswith("y"):
+        sys.exit(1)
+
+    if service == "creator-node":
+        if seed_job:
+            print(
+                "The -s and --seed-job are not supported with launching creator-node",
+                file=sys.stderr,
+            )
+
+        cm_upd = _kubectl_diff("creator-node", "cm", manifests_path)
+        backend_upd = _kubectl_diff("creator-node", "deploy-backend", manifests_path)
+
+        _kubectl_apply("creator-node", "svc", manifests_path)
+        _kubectl_apply("creator-node", "pvc", manifests_path)
+        _kubectl_apply("creator-node", "deploy-ipfs", manifests_path)
+        _kubectl_apply("creator-node", "cm", manifests_path)
+        _kubectl_apply("creator-node", "deploy-backend", manifests_path)
+
+        # If config map is updated but backend is not then restart backend
+        if cm_upd and (not backend_upd):
+            print("Restarting backend")
+            subprocess.run(["kubectl", "delete", "pods", "-l", "tier=backend"])
+    elif service == "discovery-provider":
+        cm_upd = _kubectl_diff("discovery-provider", "cm", manifests_path)
+        backend_upd = _kubectl_diff("discovery-provider", "deploy", manifests_path)
+
+        _kubectl_apply("discovery-provider", "cm", manifests_path)
+        _kubectl_apply("discovery-provider", "svc", manifests_path)
+        _kubectl_apply("discovery-provider", "pvc", manifests_path)
+        _kubectl_apply("discovery-provider", "deploy", manifests_path)
+
+        print("Waiting for discovery-provider health check...")
+        while not health_check("discovery-provider", cmd=False):
+            time.sleep(5)
+
+        if seed_job:
+            _kubectl_apply("discovery-provider", "deploy-no-workers", manifests_path)
+            time.sleep(60)
+            _kubectl_apply("discovery-provider", "db-seed-job", manifests_path)
+
+        print("Waiting for seed job to complete if running this might take a while")
+        _kubectl_wait_seed_job()
+
+        _kubectl_apply("discovery-provider", "deploy", manifests_path)
+
+        # If config map is updated but backend is not then restart backend
+        if cm_upd and (not backend_upd):
+            print("Restarting backend")
+            subprocess.run(["kubectl", "delete", "pods", "-l", "tier=backend"])
+    elif service == "identity":
+        cm_upd = _kubectl_diff("identity", "cm", manifests_path)
+        backend_upd = _kubectl_diff("identity", "deploy", manifests_path)
+
+        _kubectl_apply("identity", "svc", manifests_path)
+        _kubectl_apply("identity", "cm", manifests_path)
+        _kubectl_apply("identity", "deploy", manifests_path)
+
+        # If config map is updated but backend is not then restart backend
+        if cm_upd and (not backend_upd):
+            print("Restarting backend")
+            subprocess.run(["kubectl", "delete", "pods", "-l", "tier=backend"])
+
+    if configure_ipfs_flag:
+        print("Sleeping 60 seconds...")
+        time.sleep(60)
+        configure_ipfs(_get_ip_addr())
+
+
+def logs(service, pod, container):
+    """Show logs for provided pod"""
+    name = json.loads(
+        subprocess.run(
+            [
+                "kubectl",
+                "get",
+                "pods",
+                "-l",
+                f"release={service}",
+                "-l",
+                f"tier={pod}",
+                "-o",
+                "json",
+            ],
+            stdout=subprocess.PIPE,
+        ).stdout
+    )["items"][0]["metadata"]["name"]
+
+    print(
+        "\n".join(
+            subprocess.run(
+                ["kubectl", "logs", "--tail", "10", name]
+                + ([container] if container else []),
+                stdout=subprocess.PIPE,
+            )
+            .stdout.decode()
+            .splitlines()
+        )
+    )
+
+
+def restart(service, pod):
+    """Restart provided pod"""
+    subprocess.run(
+        [
+            "kubectl",
+            "delete",
+            "pods",
+            "-l",
+            f"release={service}" "-l",
+            f"tier={pod}",
+        ],
+    )
+
+
+def set_config(service, pod, manifests_path, key, value):
+    """Function to set the config values of a service"""
+    config_file = os.path.join(manifests_path, "config.yaml")
+
+    if service and pod:
+        if key is None:
+            key = input("\033[1mkey   :\033[0m ")
+        if value is None:
+            value = input("\033[1mvalue :\033[0m ")
+
+        config = {}
+        if os.path.isfile(config_file):
+            with open(config_file, "r") as stream:
+                config = yaml.safe_load(stream) or {}
+
+        config[service] = config[service] if service in config else {}
+        config[service][pod] = config[service][pod] if pod in config[service] else {}
+        config[service][pod][key] = value
+
+        with open(config_file, "w") as stream:
+            yaml.safe_dump(config, stream)
+
+    print("Updating config maps")
+    _apply_config(manifests_path)
+
+
+def set_tag(tag, manifests_path):
+    """Function to manually set the tag in the repo"""
+    for file in [
+        "audius/creator-node/creator-node-deploy-backend.yaml",
+        "audius/discovery-provider/discovery-provider-deploy.yaml",
+        "audius/discovery-provider/discovery-provider-deploy-no-workers.yaml",
+        "audius/identity/identity-deploy.yaml",
+    ]:
+        print(f"Setting tag in {file}")
+        # use regex to replace the tag in the repo
+        with open(os.path.join(manifests_path, file), "r+") as fp:
+            content = fp.read()
+            pattern = r"(image: audius.*:).*"
+            replace = fr"\g<1>{re.escape(tag)}"
+            content = re.sub(pattern, replace, content)
+
+            fp.seek(0)
+            fp.write(content)
+            fp.truncate()
+
+    print()
+    print(_git_log("AudiusProject/audius-protocol", tag, 10))
+
+
+def upgrade(launch_flag, branch, manifests_path):
+    """
+    Function to upgrade the node from github
+
+      - git checkout the config maps to prevent conflicts (configs are backed up)
+      - git pull the changes from source (audius-k8s-manifests)
+      - Apply backed up configs to the config map
+      - Call the launch function, this applies the config maps and restarts with the new configs.
+    """
+
+    subprocess.run(["git", "fetch"], cwd=manifests_path)
+
+    for file in [
+        "audius/creator-node/creator-node-cm.yaml",
+        "audius/discovery-provider/discovery-provider-cm.yaml",
+        "audius/identity/identity-cm.yaml",
+        "audius/creator-node/creator-node-deploy-backend.yaml",
+        "audius/discovery-provider/discovery-provider-deploy.yaml",
+        "audius/discovery-provider/discovery-provider-deploy-no-workers.yaml",
+        "audius/identity/identity-deploy.yaml",
+    ]:
+        print(f"Reverting {file}")
+        proc = subprocess.run(["git", "checkout", "--", file], cwd=manifests_path)
+        if proc.returncode != 0:
+            print(f"Unable to revert {file}", file=sys.stderr)
+            sys.exit(1)
+
+    if branch:
+        print("Checking out to provided branch")
+        proc = subprocess.run(["git", "checkout", branch], cwd=manifests_path)
+        if proc.returncode != 0:
+            print("Unable to checkout to given branch", file=sys.stderr)
+            sys.exit(1)
+
+    print("Pulling changes from source")
+    proc = subprocess.run(["git", "pull"], cwd=manifests_path)
+    if proc.returncode != 0:
+        print("Unable to pull changes from source", file=sys.stderr)
+        sys.exit(1)
+
+    print("Updating config maps")
+    _apply_config(manifests_path)
+
+    subprocess.run([os.path.join(manifests_path, "post-pull.sh")])
+
+    # if flag is set then relaunch nodes
+    if launch_flag:
+        svc = [item["metadata"]["name"] for item in _kubectl_get_svc()["items"]]
+
+        if "creator-node-backend-svc" in svc:
+            print("Upgrading creator-node...")
+            launch("creator-node", False, False, manifests_path)
+        if "discovery-provider-backend-svc" in svc:
+            print("Upgrading discovery-provider...")
+            launch("discovery-provider", False, False, manifests_path)
+        if "identity-backend-svc" in svc:
+            print("Upgrading identity...")
+            launch("identity", False, False, manifests_path)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="A cli tool to manage creator-node, discovery-provider and identity"
+    )
+
+    parser.add_argument(
+        "-m",
+        "--manifests-path",
+        default=os.getenv(
+            "MANIFESTS_PATH", os.path.expanduser("~/audius-k8s-manifests")
+        ),
+        help="Path to audius-k8s-manifests, if not specified, the value of the MANIFESTS_PATH environment variable, or ~/audius-k8s-manifests if neither is specified.",
+    )
+
+    subparser = parser.add_subparsers(
+        title="operations",
+        dest="operation",
+        required=True,
+    )
+
+    # auto-upgrade subcommand parser
+    parser_auto_upgrade = subparser.add_parser(
+        "auto-upgrade",
+        help="Sets up a cron job to auto upgrade services",
+    )
+
+    parser_auto_upgrade.add_argument(
+        "cron_expression",
+        default="0 */6 * * *",
+        nargs="?",
+        help="Cron expression (default: every 6 hours)",
+    )
+
+    parser_auto_upgrade.add_argument(
+        "-r",
+        "--remove",
+        action="store_true",
+        help="Remove auto-upgrade job",
+    )
+
+    # check subcommand parser
+    parser_check_config = subparser.add_parser(
+        "check-config",
+        help="Checks that there are no unset keys in config maps",
+    )
+
+    parser_check_config.add_argument(
+        "service",
+        metavar="service",
+        choices=["creator-node", "discovery-provider", "identity"],
+        help="The sevice to check config for (creator-node, discovery-provider or identity)",
+    )
+
+    # configure-ipfs subcommand parser
+    parser_configure_ipfs = subparser.add_parser(
+        "configure-ipfs",
+        help="Finishes configuration of ipfs hostname",
+    )
+
+    parser_configure_ipfs.add_argument(
+        "hostname",
+        help="The hostname to use when configuring ipfs",
+    )
+
+    # health-check subcommand parser
+    parser_health_check = subparser.add_parser(
+        "health-check",
+        help="Run health checks",
+    )
+
+    parser_health_check.add_argument(
+        "service",
+        metavar="service",
+        choices=["creator-node", "discovery-provider", "identity"],
+        help="Service to run health checks for (creator-node, discovery-provider, identity)",
+    )
+
+    # launch subcommand parser
+    parser_launch = subparser.add_parser(
+        "launch",
+        help="Launch provided service",
+    )
+
+    parser_launch.add_argument(
+        "-s",
+        "--seed-job",
+        action="store_true",
+        help="Run seed job when launcing discovery-provider",
+    )
+
+    parser_launch.add_argument(
+        "-i",
+        "--configure-ipfs",
+        action="store_true",
+        help="Configure IPFS after launching service",
+    )
+
+    parser_launch.add_argument(
+        "service",
+        metavar="service",
+        choices=["creator-node", "discovery-provider", "identity"],
+        help="The service to launch (creator-node, discovery-provider or identity)",
+    )
+
+    # logs subcommand parser
+    parser_logs = subparser.add_parser(
+        "logs",
+        help="Show logs for provided pod",
+    )
+
+    parser_logs.add_argument(
+        "service",
+        metavar="service",
+        choices=["creator-node", "discovery-provider", "identity"],
+        help="The service to get logs for (creator-node, discovery-provider or identity)",
+    )
+
+    parser_logs.add_argument(
+        "pod",
+        help="The pod to get logs for (backend, db, etc.)",
+    )
+
+    parser_logs.add_argument(
+        "container",
+        nargs="?",
+        help="The container to get logs for (server, celery, beat etc.)",
+    )
+
+    # restart subcommand parser
+    parser_restart = subparser.add_parser(
+        "restart",
+        help="Restart provided pod",
+    )
+
+    parser_restart.add_argument(
+        "service",
+        metavar="service",
+        choices=["creator-node", "discovery-provider", "identity"],
+        help="The service which contain the pod (creator-node, discovery-provider or identity)",
+    )
+
+    parser_restart.add_argument(
+        "pod",
+        help="The pod to restart (backend, db, etc.)",
+    )
+
+    # set-config subcommand parser
+    parser_set_config = subparser.add_parser(
+        "set-config",
+        help="Set a config option, if no args are provided then updates config maps with values from the config file",
+    )
+
+    parser_set_config.add_argument(
+        "service",
+        nargs="?",
+        metavar="service",
+        choices=["creator-node", "discovery-provider", "identity"],
+        help="The service to set a config value for (creator-node, discovery-provider or identity)",
+    )
+
+    parser_set_config.add_argument(
+        "pod",
+        nargs="?",
+        default="backend",
+        help="The pod to set a config value for (backend, db, etc.)",
+    )
+
+    parser_set_config.add_argument(
+        "--key",
+        help="The config key to set",
+    )
+
+    parser_set_config.add_argument(
+        "--value",
+        help="The value to set for the config key",
+    )
+
+    # set-tag subcommand parser
+    parser_set_tag = subparser.add_parser(
+        "set-tag",
+        help="Set tag for creator-node and discovery-provider",
+    )
+
+    parser_set_tag.add_argument(
+        "tag",
+        help="",
+    )
+
+    # upgrade subcommand parser
+    parser_upgrade = subparser.add_parser(
+        "upgrade",
+        help="Pulls from source and relaunches with latest version of audius-k8s-manifests",
+    )
+
+    parser_upgrade.add_argument(
+        "branch",
+        nargs="?",
+        help="Branch to use, if not provided will use the current branch",
+    )
+
+    # upgrade subcommand parser
+    parser_pull = subparser.add_parser(
+        "pull",
+        help="Pulls from source and updates audius-k8s-manifests",
+    )
+
+    parser_pull.add_argument(
+        "branch",
+        nargs="?",
+        help="Branch to pull from, if not provided will use the current branch",
+    )
+
+    if len(sys.argv) == 1:
+        parser.print_help()
+        parser.exit()
+    args = parser.parse_args()
+
+    if not os.path.isdir(args.manifests_path):
+        print(
+            f"Provided manifests-path ({args.manifests_path}) does not exist\n"
+            "You can set manifests-path by doing export MANIFESTS_PATH=<manifests_path>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not os.path.isdir(os.path.join(args.manifests_path, ".git")):
+        print(
+            f"Provided manifests-path ({args.manifests_path}) is not a git repository\n"
+            "You can set manifests-path by doing export MANIFESTS_PATH=<manifests_path>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    args.manifests_path = os.path.abspath(args.manifests_path)
+
+    if args.operation == "auto-upgrade":
+        auto_upgrade(args.cron_expression, args.remove, args.manifests_path)
+    if args.operation == "check-config":
+        check_config(
+            args.service,
+            args.manifests_path,
+        )
+    elif args.operation == "configure-ipfs":
+        configure_ipfs(
+            args.hostname,
+        )
+    elif args.operation == "health-check":
+        health_check(
+            args.service,
+        )
+    elif args.operation == "launch":
+        launch(
+            args.service,
+            args.configure_ipfs,
+            args.seed_job,
+            args.manifests_path,
+        )
+    elif args.operation == "logs":
+        logs(
+            args.service,
+            args.pod,
+            args.container,
+        )
+    elif args.operation == "restart":
+        restart(
+            args.service,
+            args.pod,
+        )
+    elif args.operation == "set-config":
+        set_config(
+            args.service,
+            args.pod,
+            args.manifests_path,
+            args.key,
+            args.value,
+        )
+    elif args.operation == "set-tag":
+        set_tag(
+            args.tag,
+            args.manifests_path,
+        )
+    elif args.operation == "upgrade":
+        upgrade(
+            True,
+            args.branch,
+            args.manifests_path,
+        )
+    elif args.operation == "pull":
+        upgrade(
+            False,
+            args.branch,
+            args.manifests_path,
+        )
+
+
+if __name__ == "__main__":
+    main()

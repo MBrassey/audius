@@ -1,0 +1,106 @@
+---
+# Source: audius-creator-node/templates/backend-pvc.yaml
+
+
+
+kind: PersistentVolume
+apiVersion: v1
+metadata:
+  name: creator-node-backend-pv
+  namespace: default
+spec:
+  storageClassName: local
+  capacity:
+    storage: 1700Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: /var/k8s
+  persistentVolumeReclaimPolicy: Retain
+---
+
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: creator-node-backend-pvc
+  namespace: default
+spec:
+  storageClassName: local
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1700Gi
+
+
+
+---
+# Source: audius-creator-node/templates/db-pvc.yaml
+
+
+kind: PersistentVolume
+apiVersion: v1
+metadata:
+  name: creator-node-db-pv
+  namespace: default
+spec:
+  storageClassName: local
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: /var/k8s
+  persistentVolumeReclaimPolicy: Retain
+---
+
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: creator-node-db-pvc
+  namespace: default
+spec:
+  storageClassName: local
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+
+
+---
+# Source: audius-creator-node/templates/ipfs-pvc.yaml
+
+
+
+kind: PersistentVolume
+apiVersion: v1
+metadata:
+  name: creator-node-ipfs-pv
+  namespace: default
+spec:
+  storageClassName: local
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: /var/k8s
+  persistentVolumeReclaimPolicy: Retain
+---
+
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: creator-node-ipfs-pvc
+  namespace: default
+spec:
+  storageClassName: local
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+
+
+
