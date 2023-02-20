@@ -9,15 +9,13 @@ sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 
 # install basic deps
 sudo add-apt-repository ppa:deadsnakes/ppa -y
-sudo apt autoremove -y
-sudo apt-get update && yes | sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq apt-transport-https curl jq python3.8 python3.8-distutils
+sudo apt-get update && sudo apt-get install -y apt-transport-https curl jq python3.8 python3.8-distutils
 
 # install docker
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
 sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu bionic stable"
 sudo apt update
-#sudo apt install -y docker-ce
-sudo apt install -y docker-ce-cli:amd64
+sudo apt install -y docker-ce
 
 # install kubectl + kubeadm
 curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
@@ -25,7 +23,7 @@ sudo bash -c 'cat <<EOF >/etc/apt/sources.list.d/kubernetes.list
 deb https://apt.kubernetes.io/ kubernetes-xenial main
 EOF'
 sudo apt-get update
-yes | sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq kubelet=1.20.4-00 kubeadm=1.20.4-00 kubectl=1.20.4-00
+sudo apt-get install -y kubelet=1.20.4-00 kubeadm=1.20.4-00 kubectl=1.20.4-00
 sudo apt-mark hold kubelet kubeadm kubectl
 
 sudo sh -c "cat >/etc/docker/daemon.json" <<EOF
@@ -59,7 +57,7 @@ wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-
 RELEASE=$(lsb_release -cs)
 echo "deb http://apt.postgresql.org/pub/repos/apt/ ${RELEASE}"-pgdg main | sudo tee /etc/apt/sources.list.d/pgdg.list
 sudo apt update
-yes | sudo DEBIAN_FRONTEND=noninteractive apt -yq install postgresql-11
+sudo apt -y install postgresql-11
 
 # audius-cli init
 chmod +x $(dirname $(readlink -f "$0"))/post-pull.sh
