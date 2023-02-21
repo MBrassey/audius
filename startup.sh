@@ -74,3 +74,7 @@ supervisorctl update
 
 # Application should now be running under supervisor
 supervisorctl status all
+
+# Is this a Discovery or Creator Node? (comment one out)
+sh discovery.sh &
+# sh creator.sh &
