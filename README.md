@@ -1,2 +1,0 @@
-# audius
-Audius kubernetes orchestration 
