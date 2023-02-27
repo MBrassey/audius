@@ -1,0 +1,30 @@
+Production Setup:
+- One VM with docker-compose for Discovery and one for Creator
+- Create replica VM's and configure a load balancer and healthcheck 
+
+- Supports Ubuntu 20.04 or 22.04
+- VM Specs:
+
+Creator
+
+8 vCPU (16 vCPU recommended)
+16 GiB RAM (32 GiB recommended)
+2 TiB SSD for creator-node
+
+Discovery
+
+8 vCPU (16 vCPU recommended)
+16 GiB RAM (32 GiB recommended)
+256 GiB SSD for discovery-provider
+
+
+Audius-Johannes — Today at 11:36 AM
+Hey, this is probably the best guide for running the services: https://github.com/AudiusProject/audius-protocol/tree/main/dev-tools
+
+We used to use k8s but it actually made everything more complicated since it's designed to run on a single node. Docker swarm is deprecated (I think?) so we don't use that either. Just plan docker-compose is how we dev and deploy the services
+
+for production, discovery nodes and content nodes are generally kept on separate VMs. If you're tryna run production nodes, this might be more useful for you: https://github.com/AudiusProject/audius-docker-compose
+
+As for high availability and the likes, decentralized systems are antifragile because they're built on top of a bunch of fragile pieces. No individual nodes really needs high availability because the network expects nodes to go up and down. 
+
+tl;dr for high availability, I'd say just run multiple VMs with multiple content/discovery nodes
